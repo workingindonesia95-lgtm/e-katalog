@@ -98,6 +98,8 @@ class CatalogStore extends ChangeNotifier {
   List<Product> products = [];
   List<Change> changes = [];
   int unread = 0;
+  static const notifDays = 7; // notifikasi update hilang otomatis setelah N hari
+  DateTime? notifClearedAt; // item notif sebelum waktu ini disembunyikan (tombol Bersihkan)
   int intervalMin = 60;
   int labelDays = 3; // label produk hilang otomatis setelah N hari
   int accentIdx = 0;
@@ -116,6 +118,39 @@ class CatalogStore extends ChangeNotifier {
   String _labelSig = '';
 
   List<String> get sheets => products.map((e) => e.sheet).toSet().toList();
+
+  /// Daftar notifikasi yang tampil di panel lonceng: belum lewat [notifDays]
+  /// dan belum dibersihkan lewat tombol Bersihkan.
+  List<Change> get notifs {
+    final now = DateTime.now();
+    final ttl = Duration(days: notifDays);
+    return [
+      for (final c in changes)
+        if (now.difference(c.at) < ttl &&
+            (notifClearedAt == null || c.at.isAfter(notifClearedAt!)))
+          c
+    ];
+  }
+
+  /// Buang riwayat perubahan yang sudah lewat [notifDays] (label produk maks. 7 hari,
+  /// jadi aman). true bila ada yang dibuang.
+  bool _pruneChanges() {
+    final now = DateTime.now();
+    final ttl = Duration(days: notifDays);
+    final keep = changes.where((c) => now.difference(c.at) < ttl).toList();
+    if (keep.length == changes.length) return false;
+    changes = keep;
+    svc.saveChanges(changes);
+    return true;
+  }
+
+  /// Kosongkan daftar notifikasi. Label produk di kartu tidak ikut hilang.
+  void clearNotifs() {
+    notifClearedAt = DateTime.now();
+    unread = 0;
+    _saveMeta();
+    notifyListeners();
+  }
 
   /// Hitung label yang masih aktif (belum lewat [labelDays]).
   /// true bila ada label yang muncul / kedaluwarsa sejak hitungan terakhir.
@@ -166,6 +201,9 @@ class CatalogStore extends ChangeNotifier {
     dark = (m['dark'] as bool?) ?? false;
     unread = (m['unread'] as int?) ?? 0;
     labelDays = (m['labelDays'] as int?) ?? 3;
+    final nc = m['notifCleared'] as String?;
+    if (nc != null) notifClearedAt = DateTime.tryParse(nc);
+    _pruneChanges();
     notif = (m['notif'] as bool?) ?? true;
     accentIdx = (m['accent'] as int?) ?? 0;
     final ls = m['lastSync'] as String?;
@@ -175,7 +213,9 @@ class CatalogStore extends ChangeNotifier {
     // cek tiap 30 detik: label yang sudah lewat waktunya hilang sendiri
     _ticker?.cancel();
     _ticker = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (_refreshLabels()) notifyListeners();
+      final a = _pruneChanges();
+      final b = _refreshLabels();
+      if (a || b) notifyListeners();
     });
     await refresh();
     _schedule();
@@ -231,6 +271,7 @@ class CatalogStore extends ChangeNotifier {
         'accent': accentIdx,
         'lastSync': lastSync?.toIso8601String(),
         'unread': unread,
+        'notifCleared': notifClearedAt?.toIso8601String(),
       });
 
   Future<void> refresh() async {
@@ -1086,7 +1127,8 @@ class _HomePageState extends State<HomePage> {
                   tooltip: 'Interval cek otomatis',
                   onTap: () => showPopover(ctx,
                       width: 230,
-                      height: 232,
+                      height: 4000, // batas maks.; tinggi sebenarnya mengikuti isi
+                      fit: true,
                       arrowColor: cSurface,
                       builder: (_) => const _IntervalPanel()),
                   child: const Icon(CupertinoIcons.clock, color: Colors.white, size: 20),
@@ -1105,7 +1147,8 @@ class _HomePageState extends State<HomePage> {
                     tooltip: 'Keranjang pesanan',
                     onTap: () => showPopover(ctx,
                         width: 480,
-                        height: 4000, // otomatis dipotong sampai batas bawah layar
+                        height: 4000, // batas maks.; tinggi sebenarnya mengikuti isi
+                        fit: true,
                         arrowColor: cSurface,
                         builder: (_) => const _CartPanel()),
                     child: const Icon(CupertinoIcons.cart_fill, color: Colors.white, size: 20),
@@ -1124,7 +1167,8 @@ class _HomePageState extends State<HomePage> {
                     onTap: () {
                       showPopover(ctx,
                           width: 460,
-                          height: 4000, // otomatis sampai batas bawah layar
+                          height: 4000, // batas maks.; tinggi sebenarnya mengikuti isi
+                          fit: true,
                           arrowColor: accent,
                           builder: (_) => const _UpdatesPanel());
                       store.markRead();
@@ -2435,7 +2479,10 @@ class _CartPanelState extends State<_CartPanel> {
         }
         return Container(
           color: cBg,
-          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
             // ----- bilah judul ala iOS -----
             Container(
               height: 52,
@@ -2477,8 +2524,9 @@ class _CartPanelState extends State<_CartPanel> {
                 ),
               ]),
             ),
-            // ----- isi -----
-            Expanded(
+            // ----- isi (tinggi mengikuti jumlah barang) -----
+            Flexible(
+              fit: FlexFit.loose,
               child: cart.isEmpty
                   ? Center(
                       child: Padding(
@@ -2499,6 +2547,7 @@ class _CartPanelState extends State<_CartPanel> {
                       ),
                     )
                   : ListView(
+                      shrinkWrap: true,
                       padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
                       children: [
                         Container(
@@ -2679,7 +2728,11 @@ Future<void> showPopover(
             ),
           ),
           fit
-              ? _popMaterial(builder(ctx))
+              ? _popMaterial(AnimatedSize(
+                  duration: const Duration(milliseconds: 160),
+                  curve: Curves.easeOutCubic,
+                  alignment: Alignment.topCenter,
+                  child: builder(ctx)))
               : Positioned.fill(child: _popMaterial(builder(ctx))),
         ]),
         ),
@@ -2710,7 +2763,10 @@ class _IntervalPanel extends StatelessWidget {
       listenable: store,
       builder: (context, _) => Container(
         color: cSurface,
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
             child: Text('CEK OTOMATIS',
@@ -2734,6 +2790,7 @@ class _IntervalPanel extends StatelessWidget {
                 ]),
               ),
             ),
+          const SizedBox(height: 6),
         ]),
       ),
     );
@@ -2845,9 +2902,10 @@ class _UpdatesPanel extends StatelessWidget {
       listenable: store,
       builder: (context, _) {
         final byName = {for (final p in store.products) p.name: p};
+        final items = store.notifs;
         return Container(
           color: cSurface,
-          child: Column(children: [
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
             Container(
               color: accent,
               padding: const EdgeInsets.fromLTRB(18, 6, 6, 6),
@@ -2860,6 +2918,18 @@ class _UpdatesPanel extends StatelessWidget {
                 const Spacer(),
                 Text('Sync terakhir ${fmtTime(store.lastSync)}',
                     style: const TextStyle(color: Colors.white70, fontSize: 11.5)),
+                if (items.isNotEmpty)
+                  TextButton.icon(
+                    onPressed: store.clearNotifs,
+                    icon: const Icon(CupertinoIcons.trash, size: 14),
+                    label: const Text('Bersihkan'),
+                    style: TextButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      textStyle:
+                          const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+                    ),
+                  ),
                 IconButton(
                   tooltip: 'Tutup',
                   onPressed: () => Navigator.pop(context),
@@ -2875,20 +2945,34 @@ class _UpdatesPanel extends StatelessWidget {
                 ),
               ]),
             ),
-            Expanded(
-              child: store.changes.isEmpty
-                  ? Center(
-                      child: Text('Belum ada perubahan terdeteksi',
-                          style: TextStyle(color: cSub)))
+            Flexible(
+              fit: FlexFit.loose,
+              child: items.isEmpty
+                  ? Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 16),
+                      child: Center(
+                          child: Text('Belum ada perubahan terdeteksi',
+                              style: TextStyle(color: cSub))))
                   : ListView.separated(
-                      itemCount: store.changes.length,
+                      shrinkWrap: true,
+                      itemCount: items.length,
                       separatorBuilder: (_, _) => Divider(height: 1, indent: 86, color: cLine),
                       itemBuilder: (_, i) {
-                        final c = store.changes[i];
+                        final c = items[i];
                         return _tile(context, c, byName[c.product]);
                       },
                     ),
             ),
+            if (items.isNotEmpty)
+              Container(
+                width: double.infinity,
+                decoration: BoxDecoration(border: Border(top: BorderSide(color: cLine))),
+                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+                child: Text(
+                    'Notifikasi hilang otomatis setelah ${CatalogStore.notifDays} hari',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 11, color: cMute)),
+              ),
           ]),
         );
       },
