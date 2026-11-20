@@ -14,7 +14,7 @@ import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 
 /// Versi aplikasi yang sedang berjalan.
-const kAppVersion = '1.0.0';
+const kAppVersion = '1.0.1';
 
 /// URL Web App Apps Script (Deploy → Web app → Salin URL yang berakhiran /exec).
 const kUpdateEndpoint =

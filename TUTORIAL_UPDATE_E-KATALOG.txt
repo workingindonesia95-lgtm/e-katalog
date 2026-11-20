@@ -1,0 +1,210 @@
+=====================================================================
+ TUTORIAL LENGKAP: MERILIS UPDATE APLIKASI E-KATALOG (Katalog Importbox)
+=====================================================================
+
+Repo      : https://github.com/workingindonesia95-lgtm/e-katalog
+Folder    : C:\Users\alfadev\Documents\projek\e_katalog
+Alur      : Aplikasi -> Google Apps Script -> GitHub Releases (file zip)
+
+---------------------------------------------------------------------
+ A. CARA KERJA SINGKAT
+---------------------------------------------------------------------
+1. Kamu push "tag" versi (mis. v1.0.1) ke GitHub.
+2. GitHub Actions otomatis membangun aplikasi Windows dan membuat
+   Release berisi file zip.
+3. Apps Script membaca Release terbaru dan memberikannya ke aplikasi
+   sebagai JSON (di-cache 10 menit).
+4. Saat aplikasi dibuka, ia bertanya ke Apps Script. Bila ada versi
+   lebih baru, muncul dialog "Pembaruan tersedia".
+5. Pengguna klik "Perbarui sekarang": aplikasi mengunduh zip, memeriksa
+   hash, menutup diri, mengganti file, lalu terbuka lagi.
+
+Data katalog, foto, dan favorit TIDAK terhapus saat update, karena
+disimpan di folder data pengguna, bukan di folder aplikasi.
+
+---------------------------------------------------------------------
+ B. SETUP SATU KALI (SUDAH SELESAI)
+---------------------------------------------------------------------
+[x] Repo GitHub publik: workingindonesia95-lgtm/e-katalog
+[x] File .github/workflows/release.yml ada di repo
+[x] Settings > Actions > General > Workflow permissions =
+    "Read and write permissions"
+[x] Apps Script terpasang, REPO = 'workingindonesia95-lgtm/e-katalog'
+[x] Deploy sebagai Web app (Execute as: Me, Access: Anyone)
+[x] kUpdateEndpoint di lib/update.dart berisi URL berakhiran /exec
+[x] Release v1.0.0 sudah ada dan fungsi test di Apps Script berhasil
+
+---------------------------------------------------------------------
+ C. MERILIS VERSI BARU (LANGKAH TIAP UPDATE)
+---------------------------------------------------------------------
+Contoh: dari 1.0.0 menjadi 1.0.1
+
+LANGKAH 1 - Kerjakan perubahan kode dan tes di komputer
+    flutter run -d windows
+    (Pembaruan otomatis tidak aktif saat mode debug, ini disengaja.)
+
+LANGKAH 2 - Naikkan nomor versi di DUA tempat (harus sama!)
+    a) pubspec.yaml
+         version: 1.0.1+2
+    b) lib/update.dart
+         const kAppVersion = '1.0.1';
+
+    Aturan penomoran:
+      1.0.0 -> 1.0.1   perbaikan kecil / bug
+      1.0.0 -> 1.1.0   fitur baru
+      1.0.0 -> 2.0.0   perubahan besar
+    Angka setelah tanda + di pubspec (build number) bebas, naikkan 1.
+
+LANGKAH 3 - Commit dan push kode
+    cd C:\Users\alfadev\Documents\projek\e_katalog
+    git add .
+    git commit -m "rilis 1.0.1"
+    git push
+
+LANGKAH 4 - Buat tag dan push tag (ini memicu build otomatis)
+    git tag v1.0.1
+    git push --tags
+
+    Catatan: tag HARUS diawali huruf v dan angkanya sama dengan
+    versi di pubspec (v1.0.1 untuk versi 1.0.1).
+
+LANGKAH 5 - Tunggu build selesai (5-8 menit)
+    Buka: https://github.com/workingindonesia95-lgtm/e-katalog/actions
+    Tunggu workflow "Release Windows" bercentang hijau.
+
+LANGKAH 6 - (Opsional) Isi catatan rilis
+    Buka tab Releases > v1.0.1 > ikon pensil (Edit) > ganti isi deskripsi
+    dengan ringkasan perubahan, mis. "Perbaikan tombol tutup dan harga".
+    Teks ini tampil di dialog update pengguna. Klik Update release.
+
+LANGKAH 7 - Segarkan cache Apps Script
+    Buka script.google.com > proyek update > pilih fungsi clearCache >
+    Run. Tanpa ini, pengguna baru melihat update paling lama 10 menit
+    kemudian.
+
+LANGKAH 8 - Cek hasilnya
+    Di Apps Script jalankan fungsi test. Log harus menampilkan
+    "version": "1.0.1". Lalu buka aplikasi versi lama: dialog update
+    harus muncul.
+
+---------------------------------------------------------------------
+ D. DAFTAR PERINTAH SINGKAT (SALIN-TEMPEL)
+---------------------------------------------------------------------
+    git add .
+    git commit -m "rilis X.Y.Z"
+    git push
+    git tag vX.Y.Z
+    git push --tags
+
+---------------------------------------------------------------------
+ E. TES PERTAMA ALUR UPDATE (SEKALI SAJA)
+---------------------------------------------------------------------
+1. Unduh KatalogImportbox-v1.0.0-windows.zip dari halaman Releases.
+2. Ekstrak ke folder biasa, mis. C:\Katalog (JANGAN di Program Files).
+3. Jalankan e_katalog.exe, pastikan aplikasi normal.
+4. Rilis v1.0.1 (ikuti bagian C).
+5. Buka e_katalog.exe versi 1.0.0 tadi. Dialog update muncul.
+6. Klik "Perbarui sekarang". Aplikasi menutup sebentar lalu terbuka
+   kembali. Cek menu Tentang: versi harus 1.0.1.
+7. Coba juga tombol Tentang > "Cek pembaruan aplikasi". Setelah
+   terbaru, harus muncul pesan "Aplikasi sudah versi terbaru".
+
+---------------------------------------------------------------------
+ F. FITUR TAMBAHAN
+---------------------------------------------------------------------
+WAJIB UPDATE (versi lama tidak bisa menutup dialog):
+    Apps Script > Project Settings (ikon roda gigi) > Script properties >
+    Add property: MIN_VERSION = 1.0.1
+    Semua aplikasi di bawah versi itu dipaksa update.
+    Hapus properti itu untuk mencabut kewajiban.
+
+MENGHINDARI BATAS (RATE-LIMIT) GITHUB:
+    Bila test di Apps Script kadang error 403:
+    buat token GitHub read-only, lalu tambahkan Script property
+    GITHUB_TOKEN = (isi token). Hasil juga di-cache 10 menit.
+
+MENARIK RILIS BERMASALAH:
+    Di GitHub: buka Release yang bermasalah > Edit > centang
+    "Set as a pre-release" (atau hapus Release-nya). Endpoint hanya
+    membaca Release non-pre-release, jadi versi sebelumnya akan dipakai
+    lagi. Lalu jalankan clearCache di Apps Script.
+
+MENGUBAH KODE APPS SCRIPT:
+    Setelah mengedit Code.gs, wajib Deploy > Manage deployments >
+    ikon pensil > Version: "New version" > Deploy. URL /exec tetap sama.
+
+---------------------------------------------------------------------
+ G. PEMECAHAN MASALAH
+---------------------------------------------------------------------
+[Apps Script: "GitHub membalas 404"]
+  - Belum ada Release, atau repo masih privat, atau REPO salah.
+  - REPO harus berformat  pemilik/nama-repo  (tanpa https:// dan .git).
+
+[Apps Script: "GitHub membalas 403"]
+  - Kena batas permintaan. Tambahkan GITHUB_TOKEN (lihat bagian F).
+
+[Apps Script: "File zip tidak ada di rilis ..."]
+  - Nama zip di Release harus memuat kata "windows" dan berakhiran .zip.
+
+[git push: "Permission denied to akun-lain" (403)]
+  - Login Git tersimpan untuk akun yang salah. Jalankan:
+      cmdkey /delete:git:https://github.com
+    lalu push ulang dan login dengan akun workingindonesia95-lgtm.
+
+[git push: "rejected / fetch first"]
+  - Repo tidak kosong. Bila yakin, paksa dengan:
+      git push -u origin main --force
+
+[Actions: langkah "flutter pub get" gagal soal versi Dart]
+  - Tambahkan flutter-version di release.yml (bagian subosito/
+    flutter-action), samakan dengan hasil  flutter --version  di PC.
+
+[Actions: gagal saat membuat Release (error 403)]
+  - Settings > Actions > General > Workflow permissions >
+    "Read and write permissions" > Save, lalu jalankan ulang workflow
+    (atau hapus tag dan buat ulang, lihat di bawah).
+
+[Perlu mengulang tag yang gagal build]
+    git tag -d v1.0.1
+    git push origin :refs/tags/v1.0.1
+    (perbaiki masalahnya, commit, push, lalu)
+    git tag v1.0.1
+    git push --tags
+
+[Dialog update tidak muncul di aplikasi]
+  - Tunggu 10 menit atau jalankan clearCache di Apps Script.
+  - Pastikan versi Release lebih BESAR dari kAppVersion di aplikasi.
+  - Pastikan komputer terhubung internet.
+  - Pastikan kUpdateEndpoint benar dan Web app diakses "Anyone".
+
+[Dialog muncul tapi pesan: "Mode pengembangan terdeteksi"]
+  - Normal bila dijalankan lewat flutter run. Uji dengan aplikasi
+    hasil unduhan zip Release.
+
+[Setelah klik Perbarui, aplikasi menutup tapi tidak terbuka lagi]
+  - Folder aplikasi kemungkinan tidak bisa ditulis (mis. Program Files).
+    Pindahkan ke folder biasa seperti C:\Katalog.
+  - Antivirus bisa menahan file. Tambahkan pengecualian untuk folder
+    aplikasi.
+  - Lihat file sisa di:  %TEMP%\katalog_update\  (apply.bat dan folder
+    "new"). Salin isi folder "new" manual ke folder aplikasi sebagai
+    pemulihan darurat.
+
+[Pesan: "File pembaruan rusak atau tidak cocok"]
+  - Hash unduhan tidak sama dengan yang dari GitHub. Coba lagi. Bila
+    terus terjadi, periksa koneksi atau antivirus.
+
+---------------------------------------------------------------------
+ H. CATATAN PENTING
+---------------------------------------------------------------------
+- Selalu samakan nomor versi: pubspec.yaml, kAppVersion, dan tag
+  (vX.Y.Z). Bila kAppVersion lupa dinaikkan, aplikasi baru akan terus
+  menganggap dirinya versi lama dan menawarkan update berulang-ulang.
+- Jangan menghapus Release terakhir tanpa pengganti: aplikasi tidak akan
+  menemukan update, dan Apps Script menampilkan error 404.
+- Jangan menyebarkan token GitHub atau memasukkannya ke kode aplikasi.
+  Token hanya boleh di Script properties Apps Script.
+- Aplikasi hanya mau mengunduh dari github.com dan *.githubusercontent.com.
+- Repo publik berarti kode di dalamnya bisa dilihat siapa saja. Jangan
+  menyimpan kunci rahasia di repo.
+=====================================================================
