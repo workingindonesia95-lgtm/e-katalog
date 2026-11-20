@@ -2,7 +2,7 @@
 name: Release Windows
 on:
   push:
-    tags: ['v*']
+    tags: ['v1.1.0']
 permissions:
   contents: write
 jobs:
