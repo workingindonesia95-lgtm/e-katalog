@@ -14,7 +14,7 @@ import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 
 /// Versi aplikasi yang sedang berjalan.
-const kAppVersion = '1.0.1';
+const kAppVersion = '1.1.0';
 
 /// URL Web App Apps Script (Deploy → Web app → Salin URL yang berakhiran /exec).
 const kUpdateEndpoint =
@@ -30,6 +30,7 @@ class UpdateInfo {
     this.sha256,
     this.notes = '',
     this.minVersion = '0.0.0',
+    this.supplierWa = '',
   });
 
   final String version;
@@ -38,6 +39,7 @@ class UpdateInfo {
   final String? sha256;
   final String notes;
   final String minVersion;
+  final String supplierWa;
 
   /// Wajib update bila versi terpasang di bawah versi minimum.
   bool get mandatory => compareVersions(kAppVersion, minVersion) < 0;
@@ -49,6 +51,7 @@ class UpdateInfo {
     sha256: (m['sha256'] as String?)?.toLowerCase(),
     notes: (m['notes'] as String?) ?? '',
     minVersion: (m['minVersion'] as String?) ?? '0.0.0',
+    supplierWa: ((m['supplierWa'] as String?) ?? '').trim(),
   );
 }
 
@@ -76,6 +79,10 @@ int compareVersions(String a, String b) {
 
 class UpdateService {
   static bool _busy = false;
+
+  /// Dipanggil tiap kali info dari server terbaca; berisi nomor WhatsApp supplier
+  /// bawaan (kosong bila tidak diatur di Apps Script).
+  static void Function(String wa)? onSupplierWa;
   static final _work = Directory(
     '${Directory.systemTemp.path}\\katalog_update',
   );
@@ -161,6 +168,7 @@ class UpdateService {
       if (m['error'] != null) throw HttpException('${m['error']}');
       final info = UpdateInfo.fromJson(m);
       _checkHost(info.url);
+      onSupplierWa?.call(info.supplierWa);
       return info;
     } finally {
       c.close(force: true);

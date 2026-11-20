@@ -81,6 +81,18 @@ const Map<String, (String, Color, IconData)> labelStyle = {
 };
 
 // ================= STORE =================
+/// Satu baris di keranjang pesanan (produk + varian + jumlah).
+class CartLine {
+  CartLine(this.pkey, this.name, this.variant, this.qty);
+  final String pkey, name;
+  final String? variant;
+  int qty;
+
+  Map<String, dynamic> toJson() => {'k': pkey, 'n': name, 'v': variant, 'q': qty};
+  factory CartLine.fromJson(Map<String, dynamic> j) =>
+      CartLine('${j['k']}', '${j['n']}', j['v'] as String?, (j['q'] as num?)?.toInt() ?? 1);
+}
+
 class CatalogStore extends ChangeNotifier {
   final svc = CatalogService();
   List<Product> products = [];
@@ -92,6 +104,9 @@ class CatalogStore extends ChangeNotifier {
   bool notif = true;
   bool dark = false;
   Set<String> favs = {};
+  List<CartLine> cart = [];
+  String waNumber = '';
+  String defaultWa = ''; // nomor bawaan dari server (Apps Script)
   bool loading = false;
   String? error;
   DateTime? lastSync;
@@ -142,6 +157,12 @@ class CatalogStore extends ChangeNotifier {
     final m = await svc.loadMeta();
     intervalMin = m['v'] == 2 ? ((m['interval'] as int?) ?? 60) : 60;
     favs = {...((m['favs'] as List?) ?? []).map((e) => '$e')};
+    cart = [
+      for (final e in (m['cart'] as List?) ?? [])
+        CartLine.fromJson(Map<String, dynamic>.from(e as Map))
+    ];
+    waNumber = (m['wa'] as String?) ?? '';
+    defaultWa = (m['waDefault'] as String?) ?? '';
     dark = (m['dark'] as bool?) ?? false;
     unread = (m['unread'] as int?) ?? 0;
     labelDays = (m['labelDays'] as int?) ?? 3;
@@ -200,6 +221,9 @@ class CatalogStore extends ChangeNotifier {
   Future<void> _saveMeta() => svc.saveMeta({
         'v': 2,
         'favs': favs.toList(),
+        'cart': cart.map((e) => e.toJson()).toList(),
+        'wa': waNumber,
+        'waDefault': defaultWa,
         'dark': dark,
         'interval': intervalMin,
         'labelDays': labelDays,
@@ -249,6 +273,55 @@ class CatalogStore extends ChangeNotifier {
         body: ch.take(3).map((c) => '${_label(c.type)}: ${c.product}').join('\n'),
       ).show();
     }
+  }
+
+  // ---------- keranjang pesanan (lokal) ----------
+  int get cartCount => cart.fold(0, (a, l) => a + l.qty);
+
+  Product? productOf(CartLine l) {
+    for (final p in products) {
+      if (p.key == l.pkey) return p;
+    }
+    return null;
+  }
+
+  void addToCart(Product p, String? variant, int qty) {
+    final i = cart.indexWhere((l) => l.pkey == p.key && l.variant == variant);
+    if (i >= 0) {
+      cart[i].qty = (cart[i].qty + qty).clamp(1, 999);
+    } else {
+      cart.add(CartLine(p.key, p.name, variant, qty.clamp(1, 999)));
+    }
+    _saveMeta();
+    notifyListeners();
+  }
+
+  void setQty(CartLine l, int q) {
+    if (q < 1) {
+      cart.remove(l);
+    } else {
+      l.qty = q.clamp(1, 999);
+    }
+    _saveMeta();
+    notifyListeners();
+  }
+
+  void clearCart() {
+    cart.clear();
+    _saveMeta();
+    notifyListeners();
+  }
+
+  void setDefaultWa(String v) {
+    if (v == defaultWa) return;
+    defaultWa = v;
+    _saveMeta();
+    notifyListeners();
+  }
+
+  void setWa(String v) {
+    waNumber = v;
+    _saveMeta();
   }
 
   void toggleFav(Product p) {
@@ -753,6 +826,7 @@ class _HomePageState extends State<HomePage> {
     _qF.addListener(() {
       if (mounted) setState(() {});
     });
+    UpdateService.onSupplierWa = store.setDefaultWa;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) UpdateService.checkOnStart(context);
     });
@@ -1018,6 +1092,26 @@ class _HomePageState extends State<HomePage> {
                   child: const Icon(CupertinoIcons.clock, color: Colors.white, size: 20),
                 ),
               ),
+              _Bump(
+                key: cartKey,
+                child: Badge(
+                isLabelVisible: store.cartCount > 0,
+                label: Text('${store.cartCount}'),
+                backgroundColor: brandYellow,
+                textColor: Colors.black87,
+                offset: const Offset(-2, 2),
+                child: Builder(
+                  builder: (ctx) => _HdrBtn(
+                    tooltip: 'Keranjang pesanan',
+                    onTap: () => showPopover(ctx,
+                        width: 480,
+                        height: 4000, // otomatis dipotong sampai batas bawah layar
+                        arrowColor: cSurface,
+                        builder: (_) => const _CartPanel()),
+                    child: const Icon(CupertinoIcons.cart_fill, color: Colors.white, size: 20),
+                  ),
+                ),
+              )),
               Badge(
                 isLabelVisible: store.unread > 0,
                 label: Text('${store.unread}'),
@@ -1030,7 +1124,7 @@ class _HomePageState extends State<HomePage> {
                     onTap: () {
                       showPopover(ctx,
                           width: 460,
-                          height: 580,
+                          height: 4000, // otomatis sampai batas bawah layar
                           arrowColor: accent,
                           builder: (_) => const _UpdatesPanel());
                       store.markRead();
@@ -1044,7 +1138,8 @@ class _HomePageState extends State<HomePage> {
                   tooltip: 'Pengaturan',
                   onTap: () => showPopover(ctx,
                       width: 400,
-                      height: 600,
+                      height: 4000, // batas maks.; tinggi sebenarnya mengikuti isi
+                      fit: true,
                       arrowColor: cSurface,
                       builder: (_) => const _SettingsPanel()),
                   child: const Icon(CupertinoIcons.gear_alt_fill, color: Colors.white, size: 20),
@@ -1624,6 +1719,32 @@ class _Detail extends StatefulWidget {
 
 class _DetailState extends State<_Detail> {
   bool _copied = false;
+  bool _added = false;
+  final _imgKey = GlobalKey();
+  String? _selVar;
+  int _qty = 1;
+
+  Widget _qtyStepper() => Container(
+        height: 46,
+        decoration: BoxDecoration(
+            border: Border.all(color: cLine), borderRadius: BorderRadius.circular(10)),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            onPressed: _qty > 1 ? () => setState(() => _qty--) : null,
+            icon: const Icon(Icons.remove, size: 16),
+          ),
+          SizedBox(
+              width: 28,
+              child: Center(
+                  child: Text('$_qty', style: const TextStyle(fontWeight: FontWeight.w600)))),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            onPressed: _qty < 999 ? () => setState(() => _qty++) : null,
+            icon: const Icon(Icons.add, size: 16),
+          ),
+        ]),
+      );
 
   /// Konfirmasi gaya iOS sebelum membuka Marketing Kit di browser.
   Future<void> _confirmOpenKit() async {
@@ -1733,6 +1854,7 @@ class _DetailState extends State<_Detail> {
             child: Stack(children: [
               Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
               Container(
+                key: _imgKey,
                 width: 400,
                 color: cSurface2,
                 padding: const EdgeInsets.all(20),
@@ -1794,13 +1916,29 @@ class _DetailState extends State<_Detail> {
                               'Varian',
                               Wrap(spacing: 8, runSpacing: 8, children: [
                                 for (final v in p.variants)
-                                  Container(
-                                    padding:
-                                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                    decoration: BoxDecoration(
-                                        border: Border.all(color: cLine),
-                                        borderRadius: BorderRadius.circular(3)),
-                                    child: Text(v, style: const TextStyle(fontSize: 13)),
+                                  InkWell(
+                                    borderRadius: BorderRadius.circular(3),
+                                    onTap: () =>
+                                        setState(() => _selVar = _selVar == v ? null : v),
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 12, vertical: 6),
+                                      decoration: BoxDecoration(
+                                          color: _selVar == v
+                                              ? accent.withValues(alpha: 0.10)
+                                              : null,
+                                          border: Border.all(
+                                              color: _selVar == v ? accent : cLine,
+                                              width: _selVar == v ? 1.5 : 1),
+                                          borderRadius: BorderRadius.circular(3)),
+                                      child: Text(v,
+                                          style: TextStyle(
+                                              fontSize: 13,
+                                              color: _selVar == v ? accent : null,
+                                              fontWeight: _selVar == v
+                                                  ? FontWeight.w600
+                                                  : FontWeight.w400)),
+                                    ),
                                   ),
                               ]),
                             ),
@@ -1810,6 +1948,44 @@ class _DetailState extends State<_Detail> {
                     ),
                     const Divider(height: 24),
                     Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                      Row(children: [
+                        _qtyStepper(),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextButton.icon(
+                            style: TextButton.styleFrom(
+                              backgroundColor: accent.withValues(alpha: 0.10),
+                              foregroundColor: accent,
+                              minimumSize: const Size.fromHeight(46),
+                              textStyle:
+                                  const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10)),
+                            ),
+                            onPressed: (p.sold || (p.variants.isNotEmpty && _selVar == null))
+                                ? null
+                                : () {
+                                    store.addToCart(p, _selVar, _qty);
+                                    flyToCart(context, from: _imgKey, imagePath: p.image);
+                                    setState(() => _added = true);
+                                    Future.delayed(const Duration(seconds: 2), () {
+                                      if (mounted) setState(() => _added = false);
+                                    });
+                                  },
+                            icon: Icon(
+                                _added ? Icons.check_rounded : Icons.add_shopping_cart_rounded,
+                                size: 18),
+                            label: Text(p.sold
+                                ? 'Stok habis (SOLD)'
+                                : (p.variants.isNotEmpty && _selVar == null)
+                                    ? 'Pilih varian dulu'
+                                    : _added
+                                        ? 'Masuk keranjang'
+                                        : 'Tambah ke keranjang'),
+                          ),
+                        ),
+                      ]),
+                      const SizedBox(height: 10),
                       if (p.kit != null) ...[
                         FilledButton.icon(
                           style: FilledButton.styleFrom(
@@ -1887,12 +2063,572 @@ class _DetailState extends State<_Detail> {
 // ================= POPOVER (menempel di ikon) =================
 /// Menampilkan panel yang "menempel" di bawah ikon [anchor] dengan panah kecil
 /// yang menunjuk ke ikon tersebut (gaya popover iOS).
+/// Teks pesanan siap kirim ke supplier: satu baris per item, mis. "2x  alat ngorok".
+String buildOrderText(List<CartLine> cart, [DateTime? now]) {
+  const bulan = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+  final t = now ?? DateTime.now();
+  final tgl = '${t.day} ${bulan[t.month - 1]} ${t.year}, '
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+  final b = StringBuffer('Tanggal: $tgl\n\nHalo, saya mau pesan:\n\n');
+  for (final l in cart) {
+    b.write('${l.qty}x  ${l.name}');
+    if (l.variant != null) b.write(' - varian ${l.variant}');
+    b.write('\n');
+  }
+  b.write('\nMohon dicek ketersediaan stoknya. Terima kasih.');
+  return b.toString();
+}
+
+// ================= EFEK TERBANG KE KERANJANG =================
+final cartKey = GlobalKey(); // posisi ikon keranjang di header
+final cartBump = ValueNotifier<int>(0); // dipicu saat thumbnail mendarat
+
+/// Menerbangkan thumbnail produk dari [from] ke ikon keranjang di header.
+void flyToCart(BuildContext context, {required GlobalKey from, String? imagePath}) {
+  final fromBox = from.currentContext?.findRenderObject() as RenderBox?;
+  final toBox = cartKey.currentContext?.findRenderObject() as RenderBox?;
+  if (fromBox == null || toBox == null || !fromBox.attached || !toBox.attached) {
+    cartBump.value++;
+    return;
+  }
+  final start = fromBox.localToGlobal(fromBox.size.center(Offset.zero));
+  final end = toBox.localToGlobal(toBox.size.center(Offset.zero));
+  final overlay = Overlay.of(context, rootOverlay: true);
+  late OverlayEntry entry;
+  entry = OverlayEntry(
+    builder: (_) => _FlyingThumb(
+      start: start,
+      end: end,
+      imagePath: imagePath,
+      onDone: () {
+        entry.remove();
+        cartBump.value++;
+      },
+    ),
+  );
+  overlay.insert(entry);
+}
+
+class _FlyingThumb extends StatefulWidget {
+  const _FlyingThumb(
+      {required this.start, required this.end, required this.onDone, this.imagePath});
+  final Offset start, end;
+  final String? imagePath;
+  final VoidCallback onDone;
+  @override
+  State<_FlyingThumb> createState() => _FlyingThumbState();
+}
+
+class _FlyingThumbState extends State<_FlyingThumb> with SingleTickerProviderStateMixin {
+  late final AnimationController _c =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 720))
+        ..addStatusListener((st) {
+          if (st == AnimationStatus.completed) widget.onDone();
+        })
+        ..forward();
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  /// Lintasan melengkung (kurva Bezier) dari awal ke ikon keranjang.
+  Offset _at(double t) {
+    final a = widget.start, b = widget.end;
+    final c = Offset((a.dx + b.dx) / 2, min(a.dy, b.dy) - 150);
+    final u = 1 - t;
+    return a * (u * u) + c * (2 * u * t) + b * (t * t);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: AnimatedBuilder(
+          animation: _c,
+          builder: (_, _) {
+            final t = Curves.easeInOutCubic.transform(_c.value);
+            final pos = _at(t);
+            final size = 120 + (26 - 120) * t;
+            final fade = _c.value < 0.8 ? 1.0 : (1 - (_c.value - 0.8) / 0.2).clamp(0.0, 1.0);
+            return Stack(children: [
+              Positioned(
+                left: pos.dx - size / 2,
+                top: pos.dy - size / 2,
+                width: size,
+                height: size,
+                child: Opacity(
+                  opacity: fade,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      boxShadow: const [
+                        BoxShadow(color: Colors.black38, blurRadius: 16, offset: Offset(0, 6))
+                      ],
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(14),
+                      child: widget.imagePath != null
+                          ? _Img(widget.imagePath, cache: 240)
+                          : Container(
+                              color: accent,
+                              child: const Icon(Icons.shopping_cart,
+                                  color: Colors.white, size: 40)),
+                    ),
+                  ),
+                ),
+              ),
+            ]);
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/// Membungkus ikon keranjang agar "membal" saat barang mendarat.
+class _Bump extends StatefulWidget {
+  const _Bump({super.key, required this.child});
+  final Widget child;
+  @override
+  State<_Bump> createState() => _BumpState();
+}
+
+class _BumpState extends State<_Bump> with SingleTickerProviderStateMixin {
+  late final AnimationController _c =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 460));
+  late final Animation<double> _s = TweenSequence<double>([
+    TweenSequenceItem(
+        tween: Tween(begin: 1.0, end: 1.35).chain(CurveTween(curve: Curves.easeOut)), weight: 30),
+    TweenSequenceItem(
+        tween: Tween(begin: 1.35, end: 1.0).chain(CurveTween(curve: Curves.elasticOut)),
+        weight: 70),
+  ]).animate(_c);
+
+  void _go() => _c.forward(from: 0);
+
+  @override
+  void initState() {
+    super.initState();
+    cartBump.addListener(_go);
+  }
+
+  @override
+  void dispose() {
+    cartBump.removeListener(_go);
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => ScaleTransition(scale: _s, child: widget.child);
+}
+
+// ================= KERANJANG (ikon keranjang) — gaya iOS =================
+class _CartPanel extends StatefulWidget {
+  const _CartPanel();
+  @override
+  State<_CartPanel> createState() => _CartPanelState();
+}
+
+class _CartPanelState extends State<_CartPanel> {
+  late final TextEditingController _wa = TextEditingController(text: store.waNumber);
+  String? _status;
+  bool _copied = false;
+
+  @override
+  void dispose() {
+    _wa.dispose();
+    super.dispose();
+  }
+
+  Future<void> _copy() async {
+    await Clipboard.setData(ClipboardData(text: buildOrderText(store.cart)));
+    if (!mounted) return;
+    setState(() {
+      _copied = true;
+      _status = null;
+    });
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  Future<void> _sendWa() async {
+    final text = buildOrderText(store.cart);
+    final raw = _wa.text.trim().isNotEmpty ? _wa.text : store.defaultWa;
+    var n = raw.replaceAll(RegExp(r'[^0-9]'), '');
+    if (n.startsWith('0')) n = '62${n.substring(1)}';
+    final uri = Uri.parse('https://wa.me/$n?text=${Uri.encodeComponent(text)}');
+    bool ok = false;
+    try {
+      ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {}
+    if (!mounted) return;
+    if (!ok) {
+      await Clipboard.setData(ClipboardData(text: text));
+      if (!mounted) return;
+      setState(() => _status =
+          'WhatsApp tidak bisa dibuka. Pesanan sudah disalin, tempel manual di chat.');
+    } else {
+      setState(() => _status = null);
+    }
+  }
+
+  Future<void> _confirmClear() async {
+    const font = 'Inter';
+    final ok = await showCupertinoDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => CupertinoTheme(
+        data: CupertinoThemeData(
+          brightness: isDark ? Brightness.dark : Brightness.light,
+          primaryColor: accent,
+        ),
+        child: CupertinoAlertDialog(
+          title: const Text('Kosongkan keranjang?',
+              style: TextStyle(fontFamily: font, fontWeight: FontWeight.w600)),
+          content: const Padding(
+            padding: EdgeInsets.only(top: 6),
+            child: Text('Semua barang di keranjang akan dihapus.',
+                style: TextStyle(fontFamily: font, fontSize: 13, height: 1.35)),
+          ),
+          actions: [
+            CupertinoDialogAction(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Batal', style: TextStyle(fontFamily: font)),
+            ),
+            CupertinoDialogAction(
+              isDestructiveAction: true,
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Kosongkan',
+                  style: TextStyle(fontFamily: font, fontWeight: FontWeight.w600)),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok == true) store.clearCart();
+  }
+
+  // --- potongan UI ---
+  BoxDecoration get _card => BoxDecoration(
+        color: cSurface,
+        borderRadius: BorderRadius.circular(12),
+      );
+
+  Widget _thumb(Product? p) => ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: SizedBox(width: 54, height: 54, child: _Img(p?.image, cache: 140)),
+      );
+
+  /// Stepper ala iOS: [ − | 2 | + ]. Saat jumlah 1, tombol "−" menjadi ikon tong sampah.
+  Widget _stepper(CartLine l) {
+    Widget btn(IconData ic, VoidCallback onTap, {Color? color}) => InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: onTap,
+          child: SizedBox(
+              width: 30, height: 30, child: Icon(ic, size: 16, color: color ?? cText)),
+        );
+    return Container(
+      decoration: BoxDecoration(color: cBar, borderRadius: BorderRadius.circular(8)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        l.qty <= 1
+            ? btn(CupertinoIcons.trash, () => store.setQty(l, 0), color: Colors.red.shade400)
+            : btn(CupertinoIcons.minus, () => store.setQty(l, l.qty - 1)),
+        SizedBox(
+            width: 28,
+            child: Center(
+                child: Text('${l.qty}',
+                    style: TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w600, color: cText)))),
+        btn(CupertinoIcons.plus, () => store.setQty(l, l.qty + 1)),
+      ]),
+    );
+  }
+
+  Widget _lineRow(CartLine l) {
+    final p = store.productOf(l);
+    final pr = p?.grosir;
+    return Dismissible(
+      key: ValueKey('${l.pkey}#${l.variant}'),
+      direction: DismissDirection.endToStart,
+      onDismissed: (_) => store.setQty(l, 0),
+      background: Container(
+        color: Colors.red.shade500,
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 22),
+        child: const Text('Hapus',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+      ),
+      child: Container(
+        color: cSurface,
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        child: Row(children: [
+          _thumb(p),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(l.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: cText)),
+              if (l.variant != null) ...[
+                const SizedBox(height: 2),
+                Text(l.variant!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 12.5, color: cSub)),
+              ],
+              const SizedBox(height: 3),
+              Text(pr == null ? 'Harga belum tersedia' : '${rp(pr)} / pcs',
+                  style: TextStyle(fontSize: 12.5, color: cMute)),
+            ]),
+          ),
+          const SizedBox(width: 10),
+          Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+            _stepper(l),
+            const SizedBox(height: 6),
+            Text(pr == null ? '-' : rp(pr * l.qty),
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: accent)),
+          ]),
+        ]),
+      ),
+    );
+  }
+
+  Widget _bigButton({
+    required String label,
+    required IconData icon,
+    required VoidCallback? onTap,
+    required Color bg,
+    required Color fg,
+  }) =>
+      SizedBox(
+        height: 48,
+        child: TextButton.icon(
+          style: TextButton.styleFrom(
+            backgroundColor: bg,
+            foregroundColor: fg,
+            disabledBackgroundColor: bg.withValues(alpha: 0.4),
+            disabledForegroundColor: fg.withValues(alpha: 0.7),
+            textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+          onPressed: onTap,
+          icon: Icon(icon, size: 18),
+          label: Text(label),
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) {
+        final cart = store.cart;
+        var total = 0;
+        for (final l in cart) {
+          final pr = store.productOf(l)?.grosir;
+          if (pr != null) total += pr * l.qty;
+        }
+        return Container(
+          color: cBg,
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            // ----- bilah judul ala iOS -----
+            Container(
+              height: 52,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              decoration: BoxDecoration(
+                color: cSurface,
+                border: Border(bottom: BorderSide(color: cLine)),
+              ),
+              child: Row(children: [
+                const SizedBox(width: 104),
+                Expanded(
+                  child: Center(
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      Text('Keranjang',
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w600, color: cText)),
+                      if (cart.isNotEmpty)
+                        Text('${store.cartCount} barang',
+                            style: TextStyle(fontSize: 11.5, color: cSub)),
+                    ]),
+                  ),
+                ),
+                SizedBox(
+                  width: 104,
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: cart.isEmpty
+                        ? const SizedBox.shrink()
+                        : TextButton(
+                            style: TextButton.styleFrom(
+                              foregroundColor: Colors.red.shade400,
+                              textStyle:
+                                  const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                            ),
+                            onPressed: _confirmClear,
+                            child: const Text('Kosongkan', maxLines: 1, softWrap: false),
+                          ),
+                  ),
+                ),
+              ]),
+            ),
+            // ----- isi -----
+            Expanded(
+              child: cart.isEmpty
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(32),
+                        child: Column(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(CupertinoIcons.cart, size: 46, color: cMute),
+                          const SizedBox(height: 12),
+                          Text('Keranjang kosong',
+                              style: TextStyle(
+                                  fontSize: 16, fontWeight: FontWeight.w600, color: cText)),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Buka produk lalu pilih\n"Tambah ke keranjang".',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontSize: 13, color: cSub, height: 1.4),
+                          ),
+                        ]),
+                      ),
+                    )
+                  : ListView(
+                      padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+                      children: [
+                        Container(
+                          decoration: _card,
+                          clipBehavior: Clip.antiAlias,
+                          child: Column(children: [
+                            for (var i = 0; i < cart.length; i++) ...[
+                              if (i > 0)
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 78),
+                                  child: Divider(height: 1, thickness: 0.6, color: cLine),
+                                ),
+                              _lineRow(cart[i]),
+                            ],
+                          ]),
+                        ),
+                      ],
+                    ),
+            ),
+            // ----- ringkasan + kirim -----
+            if (cart.isNotEmpty)
+              Container(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 14),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  Container(
+                    decoration: _card,
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    child: Column(children: [
+                      Row(children: [
+                        Expanded(
+                            child: Text('Jumlah barang',
+                                style: TextStyle(fontSize: 13.5, color: cSub))),
+                        Text('${store.cartCount} pcs',
+                            style: TextStyle(fontSize: 13.5, color: cText)),
+                      ]),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Divider(height: 1, thickness: 0.6, color: cLine),
+                      ),
+                      Row(children: [
+                        Expanded(
+                            child: Text('Total harga grosir',
+                                style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                    color: cText))),
+                        Text(rp(total),
+                            style: TextStyle(
+                                fontSize: 19, fontWeight: FontWeight.w700, color: accent)),
+                      ]),
+                    ]),
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    decoration: _card,
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    child: Row(children: [
+                      Icon(CupertinoIcons.phone, size: 17, color: cMute),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: TextField(
+                          controller: _wa,
+                          onChanged: store.setWa,
+                          keyboardType: TextInputType.phone,
+                          style: TextStyle(fontSize: 14, color: cText),
+                          decoration: InputDecoration(
+                            border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            contentPadding: const EdgeInsets.symmetric(vertical: 14),
+                            isDense: true,
+                            hintText: store.defaultWa.isNotEmpty
+                                ? 'Supplier: ${store.defaultWa} (ketik untuk ganti)'
+                                : 'No. WhatsApp supplier (opsional)',
+                            hintStyle: TextStyle(fontSize: 13, color: cMute),
+                          ),
+                        ),
+                      ),
+                    ]),
+                  ),
+                  const SizedBox(height: 12),
+                  _bigButton(
+                    label: 'Kirim ke WhatsApp',
+                    icon: CupertinoIcons.paperplane_fill,
+                    onTap: _sendWa,
+                    bg: const Color(0xFF25D366),
+                    fg: Colors.white,
+                  ),
+                  const SizedBox(height: 8),
+                  _bigButton(
+                    label: _copied ? 'Tersalin' : 'Salin pesanan',
+                    icon: _copied ? CupertinoIcons.checkmark_alt : CupertinoIcons.doc_on_doc,
+                    onTap: _copy,
+                    bg: _copied
+                        ? const Color(0xFF2E9E5B).withValues(alpha: 0.14)
+                        : accent.withValues(alpha: 0.10),
+                    fg: _copied ? const Color(0xFF2E9E5B) : accent,
+                  ),
+                  if (_status != null) ...[
+                    const SizedBox(height: 8),
+                    Text(_status!,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 12, color: Colors.red.shade400)),
+                  ],
+                ]),
+              ),
+          ]),
+        );
+      },
+    );
+  }
+}
+
+Widget _popMaterial(Widget child) => Material(
+      color: cBg,
+      surfaceTintColor: Colors.transparent,
+      shadowColor: Colors.black54,
+      elevation: 16,
+      borderRadius: BorderRadius.circular(14),
+      clipBehavior: Clip.antiAlias,
+      child: child,
+    );
+
 Future<void> showPopover(
   BuildContext anchor, {
   required double width,
   required double height,
   required Color arrowColor,
   required WidgetBuilder builder,
+  bool fit = false, // true: tinggi panel mengikuti isi (maks. [height] / batas layar)
 }) {
   final box = anchor.findRenderObject() as RenderBox;
   final rect = box.localToGlobal(Offset.zero) & box.size;
@@ -1919,8 +2655,13 @@ Future<void> showPopover(
         left: left,
         top: top,
         width: w,
-        height: h,
-        child: Stack(clipBehavior: Clip.none, children: [
+        height: fit ? null : h,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: h),
+          child: Stack(
+            clipBehavior: Clip.none,
+            fit: fit ? StackFit.passthrough : StackFit.loose,
+            children: [
           // panah penunjuk ke ikon
           Positioned(
             left: ax - 8,
@@ -1937,18 +2678,11 @@ Future<void> showPopover(
               ),
             ),
           ),
-          Positioned.fill(
-            child: Material(
-              color: cBg,
-              surfaceTintColor: Colors.transparent,
-              shadowColor: Colors.black54,
-              elevation: 16,
-              borderRadius: BorderRadius.circular(14),
-              clipBehavior: Clip.antiAlias,
-              child: builder(ctx),
-            ),
-          ),
+          fit
+              ? _popMaterial(builder(ctx))
+              : Positioned.fill(child: _popMaterial(builder(ctx))),
         ]),
+        ),
       ),
     ]),
     transitionBuilder: (ctx, anim, _, child) {
@@ -2127,8 +2861,17 @@ class _UpdatesPanel extends StatelessWidget {
                 Text('Sync terakhir ${fmtTime(store.lastSync)}',
                     style: const TextStyle(color: Colors.white70, fontSize: 11.5)),
                 IconButton(
+                  tooltip: 'Tutup',
                   onPressed: () => Navigator.pop(context),
-                  icon: const Icon(Icons.close, color: Colors.white, size: 20),
+                  icon: const Icon(Icons.close, size: 20),
+                  style: ButtonStyle(
+                    backgroundColor: WidgetStateProperty.resolveWith((st) =>
+                        st.contains(WidgetState.hovered)
+                            ? Colors.red.shade600
+                            : Colors.transparent),
+                    foregroundColor: WidgetStateProperty.all(Colors.white),
+                    overlayColor: WidgetStateProperty.all(Colors.transparent),
+                  ),
                 ),
               ]),
             ),
@@ -2299,7 +3042,7 @@ class _SettingsPanelState extends State<_SettingsPanel> {
         ]),
       );
 
-  Widget _settingsBody() => ListView(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), children: [
+  Widget _settingsBody() => ListView(shrinkWrap: true, padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), children: [
         _label('TAMPILAN'),
         _group([
           _switchRow(CupertinoIcons.moon_fill, _indigo, 'Mode Gelap', store.dark, store.setDark),
@@ -2343,7 +3086,7 @@ class _SettingsPanelState extends State<_SettingsPanel> {
                 _iconBox(CupertinoIcons.info, _blue),
                 const SizedBox(width: 12),
                 const Expanded(child: Text('Tentang', style: TextStyle(fontSize: 15))),
-                Text('v1.0.0', style: TextStyle(color: cSub, fontSize: 13)),
+                Text('v$kAppVersion', style: TextStyle(color: cSub, fontSize: 13)),
                 const SizedBox(width: 6),
                 Icon(CupertinoIcons.chevron_forward, size: 16, color: cMute),
               ]),
@@ -2355,7 +3098,7 @@ class _SettingsPanelState extends State<_SettingsPanel> {
       ]);
 
   Widget _aboutBody() {
-    return ListView(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), children: [
+    return ListView(shrinkWrap: true, padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), children: [
       _label('TENTANG APLIKASI'),
       _group([
         Padding(
@@ -2422,7 +3165,7 @@ class _SettingsPanelState extends State<_SettingsPanel> {
       listenable: store,
       builder: (context, _) => Container(
         color: cBg,
-        child: Column(children: [
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
           Container(
             color: cSurface,
             height: 48,
@@ -2456,7 +3199,7 @@ class _SettingsPanelState extends State<_SettingsPanel> {
             ]),
           ),
           Divider(height: 1, color: cLine),
-          Expanded(child: _about ? _aboutBody() : _settingsBody()),
+          Flexible(child: _about ? _aboutBody() : _settingsBody()),
         ]),
       ),
     );

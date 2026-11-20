@@ -43,7 +43,13 @@ LANGKAH 1 - Kerjakan perubahan kode dan tes di komputer
     flutter run -d windows
     (Pembaruan otomatis tidak aktif saat mode debug, ini disengaja.)
 
-LANGKAH 2 - Naikkan nomor versi di DUA tempat (harus sama!)
+LANGKAH 2 - Naikkan nomor versi
+    CATATAN: release.yml versi terbaru otomatis menulis kAppVersion dari
+    nama tag (v1.0.1 -> 1.0.1) saat build di GitHub, jadi versi yang tampil
+    di aplikasi (menu Pengaturan > Tentang) pasti sama dengan tag.
+    Tetap sebaiknya samakan kedua tempat di bawah agar tampilan saat
+    pengembangan (flutter run) juga benar.
+    Naikkan di DUA tempat (sebaiknya sama):
     a) pubspec.yaml
          version: 1.0.1+2
     b) lib/update.dart

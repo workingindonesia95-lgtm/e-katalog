@@ -2,7 +2,7 @@
 name: Release Windows
 on:
   push:
-    tags: ['v1.0.1']
+    tags: ['v*']
 permissions:
   contents: write
 jobs:
@@ -15,7 +15,15 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      - run: flutter build windows --release
+      # Versi diambil dari tag (v1.2.0 -> 1.2.0) dan ditulis ke kAppVersion,
+      # sehingga nomor versi di aplikasi pasti sama dengan tag rilis.
+      - name: Set versi dari tag
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart('v')
+          (Get-Content lib/update.dart) -replace "const kAppVersion = '[^']*';", "const kAppVersion = '$v';" | Set-Content lib/update.dart
+          "VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - run: flutter build windows --release --build-name=$env:VERSION
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath "KatalogImportbox-${{ github.ref_name }}-windows.zip"
