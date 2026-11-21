@@ -18,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'catalog.dart';
+import 'kalkulator.dart' show KalkulatorUntung;
 import 'update.dart';
 
 const brandPurple = Color(0xFF5B14C8);
@@ -93,6 +94,47 @@ class CartLine {
       CartLine('${j['k']}', '${j['n']}', j['v'] as String?, (j['q'] as num?)?.toInt() ?? 1);
 }
 
+/// Satu barang dalam riwayat pesanan (harga grosir saat dipesan).
+class OrderLine {
+  OrderLine(this.pkey, this.name, this.variant, this.qty, this.price);
+  final String pkey, name;
+  final String? variant;
+  final int qty;
+  final int? price;
+
+  Map<String, dynamic> toJson() => {'k': pkey, 'n': name, 'v': variant, 'q': qty, 'p': price};
+  factory OrderLine.fromJson(Map<String, dynamic> j) => OrderLine('${j['k']}', '${j['n']}',
+      j['v'] as String?, (j['q'] as num?)?.toInt() ?? 1, (j['p'] as num?)?.toInt());
+}
+
+/// Satu pesanan yang pernah dikirim / disalin dari keranjang.
+class OrderRec {
+  OrderRec(this.at, this.lines, this.total);
+  final DateTime at;
+  final List<OrderLine> lines;
+  final int total;
+
+  int get count => lines.fold(0, (a, l) => a + l.qty);
+
+  /// Penanda isi pesanan (untuk mencegah catatan ganda).
+  String get signature =>
+      (lines.map((l) => '${l.pkey}|${l.variant ?? ''}|${l.qty}').toList()..sort()).join(';');
+
+  Map<String, dynamic> toJson() => {
+        'at': at.toIso8601String(),
+        'total': total,
+        'lines': lines.map((e) => e.toJson()).toList(),
+      };
+  factory OrderRec.fromJson(Map<String, dynamic> j) => OrderRec(
+        DateTime.tryParse('${j['at']}') ?? DateTime.now(),
+        [
+          for (final e in (j['lines'] as List?) ?? [])
+            OrderLine.fromJson(Map<String, dynamic>.from(e as Map))
+        ],
+        (j['total'] as num?)?.toInt() ?? 0,
+      );
+}
+
 class CatalogStore extends ChangeNotifier {
   final svc = CatalogService();
   List<Product> products = [];
@@ -104,6 +146,10 @@ class CatalogStore extends ChangeNotifier {
   int labelDays = 3; // label produk hilang otomatis setelah N hari
   int accentIdx = 0;
   bool notif = true;
+  bool notifFavOnly = false; // notifikasi desktop hanya untuk produk favorit
+  double calcAdmin = 8; // kalkulator untung: biaya admin marketplace (%)
+  int calcExtra = 0; // kalkulator untung: ongkir / biaya lain per pcs
+  List<OrderRec> orders = [];
   bool dark = false;
   Set<String> favs = {};
   List<CartLine> cart = [];
@@ -205,6 +251,13 @@ class CatalogStore extends ChangeNotifier {
     if (nc != null) notifClearedAt = DateTime.tryParse(nc);
     _pruneChanges();
     notif = (m['notif'] as bool?) ?? true;
+    notifFavOnly = (m['notifFavOnly'] as bool?) ?? false;
+    calcAdmin = (m['calcAdmin'] as num?)?.toDouble() ?? 8;
+    calcExtra = (m['calcExtra'] as num?)?.toInt() ?? 0;
+    orders = [
+      for (final e in (m['orders'] as List?) ?? [])
+        OrderRec.fromJson(Map<String, dynamic>.from(e as Map))
+    ];
     accentIdx = (m['accent'] as int?) ?? 0;
     final ls = m['lastSync'] as String?;
     if (ls != null) lastSync = DateTime.tryParse(ls);
@@ -258,6 +311,74 @@ class CatalogStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setNotifFavOnly(bool v) {
+    notifFavOnly = v;
+    _saveMeta();
+    notifyListeners();
+  }
+
+  /// Simpan pengaturan kalkulator untung (tanpa notifikasi, dipanggil saat mengetik).
+  void setCalc(double admin, int extra) {
+    calcAdmin = admin;
+    calcExtra = extra;
+    _saveMeta();
+  }
+
+  // ---------- riwayat pesanan ----------
+  /// Catat isi keranjang saat ini sebagai pesanan (harga grosir saat ini).
+  void recordOrder() {
+    if (cart.isEmpty) return;
+    var total = 0;
+    final lines = <OrderLine>[];
+    for (final l in cart) {
+      final price = productOf(l)?.grosir;
+      if (price != null) total += price * l.qty;
+      lines.add(OrderLine(l.pkey, l.name, l.variant, l.qty, price));
+    }
+    final rec = OrderRec(DateTime.now(), lines, total);
+    if (orders.isNotEmpty &&
+        orders.first.signature == rec.signature &&
+        rec.at.difference(orders.first.at) < const Duration(minutes: 10)) {
+      return; // pesanan yang sama baru saja dicatat
+    }
+    orders = [rec, ...orders].take(50).toList();
+    _saveMeta();
+    notifyListeners();
+  }
+
+  void deleteOrder(OrderRec o) {
+    orders = orders.where((e) => e != o).toList();
+    _saveMeta();
+    notifyListeners();
+  }
+
+  void clearOrders() {
+    orders = [];
+    _saveMeta();
+    notifyListeners();
+  }
+
+  /// Masukkan lagi semua barang pesanan lama ke keranjang. Mengembalikan jumlah
+  /// barang yang dilewati (sudah dihapus dari katalog / SOLD).
+  int reorder(OrderRec o) {
+    var skipped = 0;
+    for (final l in o.lines) {
+      Product? pr;
+      for (final x in products) {
+        if (x.key == l.pkey) {
+          pr = x;
+          break;
+        }
+      }
+      if (pr == null || pr.sold) {
+        skipped++;
+        continue;
+      }
+      addToCart(pr, l.variant, l.qty);
+    }
+    return skipped;
+  }
+
   Future<void> _saveMeta() => svc.saveMeta({
         'v': 2,
         'favs': favs.toList(),
@@ -268,6 +389,10 @@ class CatalogStore extends ChangeNotifier {
         'interval': intervalMin,
         'labelDays': labelDays,
         'notif': notif,
+        'notifFavOnly': notifFavOnly,
+        'calcAdmin': calcAdmin,
+        'calcExtra': calcExtra,
+        'orders': orders.map((e) => e.toJson()).toList(),
         'accent': accentIdx,
         'lastSync': lastSync?.toIso8601String(),
         'unread': unread,
@@ -304,6 +429,11 @@ class CatalogStore extends ChangeNotifier {
 
   void _notify(List<Change> ch) {
     if (!notif) return;
+    if (notifFavOnly) {
+      final names = {for (final k in favs) k.substring(k.indexOf('|') + 1)};
+      ch = ch.where((c) => names.contains(c.product.toLowerCase().trim())).toList();
+    }
+    if (ch.isEmpty) return;
     if (ch.length <= 3) {
       for (final c in ch) {
         LocalNotification(title: '${_label(c.type)}: ${c.product}', body: c.detail).show();
@@ -1603,7 +1733,8 @@ class _CardState extends State<_Card> {
           duration: const Duration(milliseconds: 180),
           curve: Curves.easeOutCubic,
           transformAlignment: Alignment.center,
-          transform: Matrix4.translationValues(0, _hover ? -6 : 0, 0)..scale(_down ? 0.985 : 1.0),
+          transform: Matrix4.translationValues(0, _hover ? -6 : 0, 0)
+            ..scaleByDouble(_down ? 0.985 : 1.0, _down ? 0.985 : 1.0, 1.0, 1.0),
           decoration: BoxDecoration(
             color: cSurface,
             borderRadius: BorderRadius.circular(14),
@@ -1952,6 +2083,8 @@ class _DetailState extends State<_Detail> {
                               ]),
                             ),
                           ),
+                          const SizedBox(height: 12),
+                          KalkulatorUntung(grosir: p.grosir, ds: p.ds, productKey: p.key, title: p.name),
                           const SizedBox(height: 22),
                           _row('Kategori', Text(p.sheet)),
                           if (p.no != null) _row('No. Katalog', Text(p.no!)),
@@ -2289,6 +2422,7 @@ class _CartPanelState extends State<_CartPanel> {
 
   Future<void> _copy() async {
     await Clipboard.setData(ClipboardData(text: buildOrderText(store.cart)));
+    store.recordOrder();
     if (!mounted) return;
     setState(() {
       _copied = true;
@@ -2309,6 +2443,7 @@ class _CartPanelState extends State<_CartPanel> {
     try {
       ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
     } catch (_) {}
+    store.recordOrder();
     if (!mounted) return;
     if (!ok) {
       await Clipboard.setData(ClipboardData(text: text));
@@ -2492,7 +2627,26 @@ class _CartPanelState extends State<_CartPanel> {
                 border: Border(bottom: BorderSide(color: cLine)),
               ),
               child: Row(children: [
-                const SizedBox(width: 104),
+                SizedBox(
+                  width: 104,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: store.orders.isEmpty
+                        ? const SizedBox.shrink()
+                        : TextButton.icon(
+                            style: TextButton.styleFrom(
+                              foregroundColor: accent,
+                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                              textStyle:
+                                  const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w500),
+                            ),
+                            onPressed: () => showDialog(
+                                context: context, builder: (_) => const _OrdersDialog()),
+                            icon: const Icon(CupertinoIcons.clock, size: 15),
+                            label: const Text('Riwayat', maxLines: 1, softWrap: false),
+                          ),
+                  ),
+                ),
                 Expanded(
                   child: Center(
                     child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -3138,6 +3292,9 @@ class _SettingsPanelState extends State<_SettingsPanel> {
           _switchRow(CupertinoIcons.bell_fill, _red, 'Notifikasi Desktop', store.notif,
               store.setNotif),
           _div(),
+          _switchRow(CupertinoIcons.heart_fill, _red, 'Notifikasi hanya produk favorit',
+              store.notifFavOnly, store.setNotifFavOnly),
+          _div(),
           _segRow<int>(
             CupertinoIcons.tag_fill,
             accent,
@@ -3286,6 +3443,191 @@ class _SettingsPanelState extends State<_SettingsPanel> {
           Flexible(child: _about ? _aboutBody() : _settingsBody()),
         ]),
       ),
+    );
+  }
+}
+
+
+// ================= RIWAYAT PESANAN =================
+class _OrdersDialog extends StatefulWidget {
+  const _OrdersDialog();
+  @override
+  State<_OrdersDialog> createState() => _OrdersDialogState();
+}
+
+class _OrdersDialogState extends State<_OrdersDialog> {
+  String? _msg;
+  final Set<OrderRec> _open = {};
+
+  void _again(OrderRec o) {
+    final skipped = store.reorder(o);
+    setState(() => _msg = skipped == 0
+        ? 'Semua barang masuk keranjang.'
+        : '${o.lines.length - skipped} barang masuk keranjang, $skipped dilewati '
+            '(SOLD / sudah dihapus dari katalog).');
+  }
+
+  Future<void> _confirmClearAll() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Hapus semua riwayat?'),
+        content: const Text('Riwayat pesanan akan dihapus permanen.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Batal')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text('Hapus', style: TextStyle(color: Colors.red.shade400)),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) store.clearOrders();
+  }
+
+  Widget _card(OrderRec o) {
+    final open = _open.contains(o);
+    return Container(
+      decoration: BoxDecoration(
+        color: cSurface2,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: cLine),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: () => setState(() => open ? _open.remove(o) : _open.add(o)),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+            child: Row(children: [
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(fmtTime(o.at),
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 2),
+                  Text('${o.count} barang · ${o.lines.length} item',
+                      style: TextStyle(fontSize: 12, color: cSub)),
+                ]),
+              ),
+              Text(rp(o.total),
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: accent)),
+              Icon(open ? Icons.expand_less : Icons.expand_more, size: 20, color: cSub),
+            ]),
+          ),
+        ),
+        if (open) ...[
+          Divider(height: 1, color: cLine),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+            child: Column(children: [
+              for (final l in o.lines)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 3),
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    SizedBox(
+                        width: 34,
+                        child: Text('${l.qty}×',
+                            style: TextStyle(fontSize: 12.5, color: cSub))),
+                    Expanded(
+                      child: Text(l.variant == null ? l.name : '${l.name} (${l.variant})',
+                          style: const TextStyle(fontSize: 13)),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(l.price == null ? '-' : rp(l.price! * l.qty),
+                        style: TextStyle(fontSize: 12.5, color: cSub)),
+                  ]),
+                ),
+            ]),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+            child: Row(children: [
+              TextButton.icon(
+                onPressed: () => store.deleteOrder(o),
+                icon: Icon(CupertinoIcons.trash, size: 15, color: Colors.red.shade400),
+                label: Text('Hapus', style: TextStyle(color: Colors.red.shade400)),
+              ),
+              const Spacer(),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(backgroundColor: accent, foregroundColor: Colors.white),
+                onPressed: () => _again(o),
+                icon: const Icon(Icons.replay_rounded, size: 17),
+                label: const Text('Pesan lagi'),
+              ),
+            ]),
+          ),
+        ],
+      ]),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) {
+        final list = store.orders;
+        return Dialog(
+          backgroundColor: cBg,
+          surfaceTintColor: Colors.transparent,
+          insetPadding: const EdgeInsets.all(32),
+          clipBehavior: Clip.antiAlias,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 460, maxHeight: 620),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Container(
+                color: cSurface,
+                height: 52,
+                padding: const EdgeInsets.only(left: 18, right: 4),
+                child: Row(children: [
+                  const Expanded(
+                      child: Text('Riwayat pesanan',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600))),
+                  if (list.isNotEmpty)
+                    TextButton(
+                      onPressed: _confirmClearAll,
+                      child: Text('Hapus semua', style: TextStyle(color: Colors.red.shade400)),
+                    ),
+                  IconButton(
+                    tooltip: 'Tutup',
+                    onPressed: () => Navigator.pop(context),
+                    icon: const Icon(Icons.close, size: 20),
+                  ),
+                ]),
+              ),
+              Divider(height: 1, color: cLine),
+              if (_msg != null)
+                Container(
+                  width: double.infinity,
+                  color: accent.withValues(alpha: 0.10),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Text(_msg!, style: TextStyle(fontSize: 12.5, color: accent)),
+                ),
+              Flexible(
+                fit: FlexFit.loose,
+                child: list.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 40, horizontal: 24),
+                        child: Text(
+                          'Belum ada riwayat.\nPesanan tercatat saat kamu menekan\n'
+                          '"Kirim ke WhatsApp" atau "Salin pesanan".',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: cSub, height: 1.4),
+                        ),
+                      )
+                    : ListView.separated(
+                        shrinkWrap: true,
+                        padding: const EdgeInsets.all(12),
+                        itemCount: list.length,
+                        separatorBuilder: (_, _) => const SizedBox(height: 8),
+                        itemBuilder: (_, i) => _card(list[i]),
+                      ),
+              ),
+            ]),
+          ),
+        );
+      },
     );
   }
 }

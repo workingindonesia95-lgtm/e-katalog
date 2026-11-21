@@ -64,11 +64,11 @@ LANGKAH 2 - Naikkan nomor versi
 LANGKAH 3 - Commit dan push kode
     cd C:\Users\alfadev\Documents\projek\e_katalog
     git add .
-    git commit -m "rilis 1.1.1"
+    git commit -m "rilis 1.1.2"
     git push
 
 LANGKAH 4 - Buat tag dan push tag (ini memicu build otomatis)
-    git tag v1.1.1
+    git tag v1.1.2
     git push --tags
 
     Catatan: tag HARUS diawali huruf v dan angkanya sama dengan

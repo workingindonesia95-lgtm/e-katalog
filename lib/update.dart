@@ -1,20 +1,25 @@
 // update.dart — pembaruan aplikasi otomatis (Windows).
 //
 // Alur: aplikasi → Google Apps Script (JSON versi terbaru) → GitHub Releases (zip).
-// Hanya memakai dart:io + PowerShell bawaan Windows, tanpa paket tambahan.
+// Paket diunduh & diekstrak di latar belakang; pemasangan = tutup, timpa, buka lagi
+// (tersembunyi, tanpa jendela cmd). Butuh paket: archive, crypto, path.
 //
 // WAJIB: samakan kAppVersion dengan `version:` di pubspec.yaml setiap rilis.
 
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' show max;
 
+import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as pth;
 
 /// Versi aplikasi yang sedang berjalan.
-const kAppVersion = '1.1.2';
+const kAppVersion = '2.0.1';
 
 /// URL Web App Apps Script (Deploy → Web app → Salin URL yang berakhiran /exec).
 const kUpdateEndpoint =
@@ -91,7 +96,8 @@ class UpdateService {
 
   /// Panggil sekali saat aplikasi dibuka. Diam bila gagal / tidak ada update.
   static Future<void> checkOnStart(BuildContext context) async {
-    await _cleanup();
+    await _cleanupStale();
+    if (!context.mounted) return;
     await _check(context, silent: true);
   }
 
@@ -99,10 +105,37 @@ class UpdateService {
   static Future<void> checkManual(BuildContext context) =>
       _check(context, silent: false);
 
+  static File get _readyFile => File('${_work.path}\\ready.json');
+
   static Future<void> _cleanup() async {
     try {
       if (await _work.exists()) await _work.delete(recursive: true);
     } catch (_) {}
+  }
+
+  /// Saat aplikasi dibuka: hapus sisa pembaruan lama, tapi simpan paket yang
+  /// sudah siap dan masih lebih baru dari versi terpasang.
+  static Future<void> _cleanupStale() async {
+    try {
+      if (await _readyFile.exists()) {
+        final m = jsonDecode(await _readyFile.readAsString()) as Map;
+        if (compareVersions('${m['version']}', kAppVersion) > 0) return;
+      }
+    } catch (_) {}
+    await _cleanup();
+  }
+
+  /// Folder paket versi [info] bila sudah diunduh & diekstrak (tinggal dipasang).
+  static Future<String?> _stagedSrc(UpdateInfo info) async {
+    try {
+      if (!await _readyFile.exists()) return null;
+      final m = jsonDecode(await _readyFile.readAsString()) as Map;
+      final src = '${m['src']}';
+      if ('${m['version']}' == info.version && Directory(src).existsSync()) {
+        return src;
+      }
+    } catch (_) {}
+    return null;
   }
 
   static Future<void> _check(
@@ -111,11 +144,12 @@ class UpdateService {
   }) async {
     if (_busy || !Platform.isWindows) return;
     if (!_configured) {
-      if (!silent)
+      if (!silent) {
         await _msg(
           context,
           'Alamat server pembaruan belum diisi (kUpdateEndpoint).',
         );
+      }
       return;
     }
     _busy = true;
@@ -123,10 +157,17 @@ class UpdateService {
       final info = await fetchLatest();
       if (!context.mounted) return;
       if (compareVersions(info.version, kAppVersion) <= 0) {
-        if (!silent)
+        if (!silent) {
           await _msg(context, 'Aplikasi sudah versi terbaru (v$kAppVersion).');
+        }
         return;
       }
+      // Saat dibuka: unduh diam-diam di latar belakang, supaya begitu pengguna
+      // menekan tombol, pembaruan langsung terpasang tanpa menunggu.
+      if (silent && !info.mandatory && await _stagedSrc(info) == null) {
+        await _stage(info, (_, _) {});
+      }
+      if (!context.mounted) return;
       await showDialog(
         context: context,
         barrierDismissible: false,
@@ -134,8 +175,9 @@ class UpdateService {
       );
     } catch (e) {
       debugPrint('[update] gagal cek: $e');
-      if (!silent && context.mounted)
+      if (!silent && context.mounted) {
         await _msg(context, 'Gagal mengecek pembaruan.\n$e');
+      }
     } finally {
       _busy = false;
     }
@@ -161,8 +203,9 @@ class UpdateService {
       final req = await c.getUrl(Uri.parse(kUpdateEndpoint));
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
       final res = await req.close().timeout(const Duration(seconds: 20));
-      if (res.statusCode != 200)
+      if (res.statusCode != 200) {
         throw HttpException('Server membalas HTTP ${res.statusCode}');
+      }
       final body = await res.transform(utf8.decoder).join();
       final m = jsonDecode(body) as Map<String, dynamic>;
       if (m['error'] != null) throw HttpException('${m['error']}');
@@ -186,34 +229,24 @@ class UpdateService {
 
   static String _ps(String s) => s.replaceAll("'", "''");
 
-  static Future<void> _powershell(String cmd) async {
-    final r = await Process.run('powershell', [
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      cmd,
-    ]);
-    if (r.exitCode != 0)
-      throw ProcessException(
-        'powershell',
-        [],
-        '${r.stderr}'.trim(),
-        r.exitCode,
-      );
-  }
-
-  /// Unduh → verifikasi → ekstrak → jalankan updater → keluar dari aplikasi.
-  static Future<void> downloadAndInstall(
-    UpdateInfo info,
-    void Function(double? progress, String status) onProgress,
-  ) async {
+  static void _ensureRelease() {
     final exe = Platform.resolvedExecutable;
     if (kDebugMode || exe.toLowerCase().contains('\\build\\windows')) {
       throw 'Mode pengembangan terdeteksi. Pembaruan otomatis hanya untuk aplikasi hasil build rilis.';
     }
-    final appDir = File(exe).parent.path;
-    final exeName = exe.split('\\').last;
+  }
 
+  /// Unduh → verifikasi → ekstrak ke folder sementara (tanpa menutup aplikasi).
+  /// Hasilnya ditandai di ready.json agar tidak perlu diunduh ulang.
+  static Future<String> _stage(
+    UpdateInfo info,
+    void Function(double? progress, String status) onProgress,
+  ) async {
+    _ensureRelease();
+    final existing = await _stagedSrc(info);
+    if (existing != null) return existing;
+
+    final exeName = Platform.resolvedExecutable.split('\\').last;
     await _cleanup();
     await _work.create(recursive: true);
     final zip = File('${_work.path}\\update.zip');
@@ -225,8 +258,9 @@ class UpdateService {
     try {
       final req = await c.getUrl(Uri.parse(info.url));
       final res = await req.close();
-      if (res.statusCode != 200)
+      if (res.statusCode != 200) {
         throw HttpException('Unduhan gagal (HTTP ${res.statusCode})');
+      }
       final total = res.contentLength > 0
           ? res.contentLength
           : (info.size ?? 0);
@@ -245,61 +279,96 @@ class UpdateService {
       c.close(force: true);
     }
 
-    // 2) verifikasi hash (bila server memberikan)
+    // 2) verifikasi hash (di dalam Dart, tanpa PowerShell)
     if (info.sha256 != null && info.sha256!.isNotEmpty) {
       onProgress(null, 'Memeriksa keaslian file…');
-      final r = await Process.run('powershell', [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        "(Get-FileHash -LiteralPath '${_ps(zip.path)}' -Algorithm SHA256).Hash",
-      ]);
-      if ('${r.stdout}'.trim().toLowerCase() != info.sha256) {
+      final digest = await sha256.bind(zip.openRead()).first;
+      if ('$digest'.toLowerCase() != info.sha256) {
         throw 'File pembaruan rusak atau tidak cocok. Coba lagi nanti.';
       }
     }
 
-    // 3) ekstrak
+    // 3) ekstrak di isolate terpisah (UI tidak macet)
     onProgress(null, 'Menyiapkan pembaruan…');
-    await _powershell(
-      "Expand-Archive -LiteralPath '${_ps(zip.path)}' -DestinationPath '${_ps(out.path)}' -Force",
-    );
+    final zipPath = zip.path, outPath = out.path;
+    await Isolate.run(() {
+      final arc = ZipDecoder().decodeBytes(File(zipPath).readAsBytesSync());
+      for (final f in arc.files) {
+        final target = pth.normalize(pth.join(outPath, f.name));
+        if (!pth.isWithin(outPath, target)) continue; // tolak path berbahaya
+        if (f.isFile) {
+          File(target)
+            ..createSync(recursive: true)
+            ..writeAsBytesSync(f.content as List<int>);
+        } else {
+          Directory(target).createSync(recursive: true);
+        }
+      }
+    });
+    try {
+      zip.deleteSync();
+    } catch (_) {}
+
     var src = out;
     final kids = out.listSync();
-    if (kids.length == 1 && kids.first is Directory)
+    if (kids.length == 1 && kids.first is Directory) {
       src = kids.first as Directory; // zip berisi 1 folder
+    }
     if (!File('${src.path}\\$exeName').existsSync()) {
       throw 'Isi pembaruan tidak sesuai (tidak ada $exeName).';
     }
+    await _readyFile.writeAsString(
+      jsonEncode({'version': info.version, 'src': src.path}),
+    );
+    return src.path;
+  }
 
-    // 4) skrip updater: tunggu app tutup → salin → buka lagi
-    final bat = File('${_work.path}\\apply.bat');
-    await bat.writeAsString('''@echo off
-chcp 65001 >nul
-set /a n=0
-:wait
-tasklist /FI "IMAGENAME eq $exeName" 2>nul | find /I "$exeName" >nul
-if errorlevel 1 goto copy
-set /a n+=1
-if %n% GEQ 40 goto fail
-timeout /t 1 /nobreak >nul
-goto wait
-:copy
-robocopy "${src.path}" "$appDir" /E /IS /IT /R:3 /W:1 >nul
-if errorlevel 8 goto fail
-start "" "$appDir\\$exeName"
-exit /b 0
-:fail
-exit /b 1
-''');
-    onProgress(1, 'Memasang & memulai ulang…');
-    await Process.start('cmd.exe', [
-      '/c',
-      bat.path,
+  /// Pasang paket yang sudah siap: aplikasi tutup, file ditimpa, lalu terbuka
+  /// lagi otomatis. Berjalan tersembunyi (tanpa jendela cmd).
+  static Future<void> _applyAndRestart(String src) async {
+    _ensureRelease();
+    final exe = Platform.resolvedExecutable;
+    final appDir = File(exe).parent.path;
+    final exeName = exe.split('\\').last;
+
+    // PowerShell menunggu proses ini berakhir (instan, tanpa polling), lalu salin & buka.
+    // BOM (\uFEFF) agar path dengan karakter non-ASCII terbaca benar.
+    final ps1 = File('${_work.path}\\apply.ps1');
+    await ps1.writeAsString(
+      '\uFEFF\$ErrorActionPreference = "SilentlyContinue"\r\n'
+      'Wait-Process -Id $pid -Timeout 30\r\n'
+      "robocopy '${_ps(src)}' '${_ps(appDir)}' /E /IS /IT /R:3 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null\r\n"
+      "if (\$LASTEXITCODE -lt 8) { Start-Process -FilePath '${_ps(appDir)}\\$exeName' }\r\n",
+      encoding: utf8,
+    );
+
+    // wscript = aplikasi GUI, jadi tidak ada jendela konsol yang muncul sama sekali.
+    final vbs = File('${_work.path}\\apply.vbs');
+    await vbs.writeAsString(
+      'CreateObject("WScript.Shell").Run '
+      '"powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""${ps1.path}""", 0, False\r\n',
+    );
+    await Process.start('wscript.exe', [
+      '//B',
+      '//Nologo',
+      vbs.path,
     ], mode: ProcessStartMode.detached);
-    await Future.delayed(const Duration(milliseconds: 400));
     exit(0);
   }
+
+  /// Dipanggil tombol "Perbarui": unduh (bila belum), lalu langsung pasang & mulai ulang.
+  static Future<void> downloadAndInstall(
+    UpdateInfo info,
+    void Function(double? progress, String status) onProgress,
+  ) async {
+    final src = await _stage(info, onProgress);
+    onProgress(1, 'Memulai ulang…');
+    await _applyAndRestart(src);
+  }
+
+  /// Paket sudah diunduh sebelumnya (pemasangan akan instan)?
+  static Future<bool> isStaged(UpdateInfo info) async =>
+      await _stagedSrc(info) != null;
 
   static String _mb(int b) => '${(b / 1048576).toStringAsFixed(1)} MB';
 }
@@ -315,9 +384,18 @@ class _UpdateDialog extends StatefulWidget {
 
 class _UpdateDialogState extends State<_UpdateDialog> {
   bool _working = false;
+  bool _ready = false; // paket sudah diunduh → pemasangan instan
   double? _progress;
   String _status = '';
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    UpdateService.isStaged(widget.info).then((v) {
+      if (mounted && v) setState(() => _ready = true);
+    });
+  }
 
   Future<void> _start() async {
     setState(() {
@@ -327,18 +405,20 @@ class _UpdateDialogState extends State<_UpdateDialog> {
     });
     try {
       await UpdateService.downloadAndInstall(widget.info, (p, s) {
-        if (mounted)
+        if (mounted) {
           setState(() {
             _progress = p;
             _status = s;
           });
+        }
       });
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         setState(() {
           _working = false;
           _error = '$e';
         });
+      }
     }
   }
 
@@ -403,7 +483,13 @@ class _UpdateDialogState extends State<_UpdateDialog> {
             ),
           FilledButton(
             onPressed: _working ? null : _start,
-            child: Text(_error != null ? 'Coba lagi' : 'Perbarui sekarang'),
+            child: Text(
+              _error != null
+                  ? 'Coba lagi'
+                  : _ready
+                  ? 'Mulai ulang & perbarui'
+                  : 'Perbarui sekarang',
+            ),
           ),
         ],
       ),

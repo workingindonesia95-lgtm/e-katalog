@@ -4,7 +4,7 @@
 ; Setiap rilis: ubah AppVersion di bawah agar sama dengan pubspec.yaml.
 
 #define AppName    "E-Katalog Importbox"
-#define AppVersion "1.0.0"
+#define AppVersion "1.1.3"
 #define AppExe     "e_katalog.exe"
 #define BuildDir   "build\windows\x64\runner\Release"
 
